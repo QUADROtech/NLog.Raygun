@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Data.SqlClient;
 using System.Linq;
-using System.Web.Mvc;
 using Mindscape.Raygun4Net;
+using MoreLinq;
 using NLog.Config;
 using NLog.Targets;
 
@@ -30,10 +32,24 @@ namespace NLog.Raygun
     public string IgnoreHeaderNames { get; set; }
 
     [RequiredParameter]
+    public List<string> GlobalDiagnosticContextNames { get; set; }
+
+    [RequiredParameter]
+    public List<string> MappedDiagnosticsContextNames { get; set; }
+
+    public RayGunTarget()
+    {
+        GlobalDiagnosticContextNames = new List<string>();
+        MappedDiagnosticsContextNames = new List<string>();
+    }
+
+    [RequiredParameter]
     public bool UseIdentityNameAsUserId { get; set; }
 
     protected override void Write(LogEventInfo logEvent)
     {
+      var properties = GetDiagnosticsContexts(logEvent);
+
       // If we have a real exception, we can log it as is, otherwise we can take the NLog message and use that.
       if (IsException(logEvent))
       {
@@ -42,12 +58,19 @@ namespace NLog.Raygun
         List<string> tags = ExtractTagsFromException(exception);
 
         RaygunClient raygunClient = CreateRaygunClient();
-        SendMessage(raygunClient, exception, tags);
-      }
-      else if (IsWebException(logEvent))
-      {
-        ExceptionContext exceptionContext = (ExceptionContext)logEvent.Parameters.First();
-        ProcessWebException(exceptionContext);
+
+        if (exception is AggregateException)
+        {
+            var aggregateException = exception as AggregateException;
+            foreach (var innerException in aggregateException.InnerExceptions)
+            {
+                SendMessage(raygunClient, innerException, tags, properties);
+            }
+        }
+        else
+        {
+            SendMessage(raygunClient, exception, tags, properties);
+        }
       }
       else
       {
@@ -56,33 +79,37 @@ namespace NLog.Raygun
         RaygunException exception = new RaygunException(logMessage, logEvent.Exception);
         RaygunClient client = CreateRaygunClient();
 
-        SendMessage(client, exception, new List<string>());
+        SendMessage(client, exception, new List<string>(), properties);
       }
     }
 
-    private static bool IsWebException(LogEventInfo logEvent)
-    {
-      return logEvent.Parameters.Any() && logEvent.Parameters.FirstOrDefault() != null && logEvent.Parameters.First().GetType() == typeof(ExceptionContext);
-    }
+      private Dictionary<string, string> GetDiagnosticsContexts(LogEventInfo logEvent)
+      {
+          string logMessage = Layout.Render(logEvent);
+          var properties = new Dictionary<string, string> {{"logMessage", logMessage}};
+          logEvent.Properties.ForEach(p => properties.Add(p.Key.ToString(), p.Value.ToString()));
+
+          foreach (var gdc in GlobalDiagnosticContextNames)
+          {
+              if (GlobalDiagnosticsContext.Contains(gdc))
+              {
+                  properties.Add(gdc, GlobalDiagnosticsContext.Get(gdc));
+              }
+          }
+
+          foreach (var mdg in MappedDiagnosticsContextNames)
+          {
+              if (MappedDiagnosticsContext.Contains(mdg))
+              {
+                  properties.Add(mdg, MappedDiagnosticsContext.Get(mdg));
+              }
+          }
+          return properties;
+      }
 
     private static bool IsException(LogEventInfo logEvent)
     {
       return logEvent.Parameters.Any() && logEvent.Parameters.FirstOrDefault() != null && logEvent.Parameters.First().GetType() == typeof(Exception);
-    }
-
-    private void ProcessWebException(ExceptionContext exceptionContext)
-    {
-      Exception exception = exceptionContext.Exception;
-      List<string> tags = ExtractTagsFromException(exception);
-
-      RaygunClient raygunClient = CreateRaygunClient();
-
-      if (exceptionContext.HttpContext.Request.IsAuthenticated && UseIdentityNameAsUserId)
-      {
-        raygunClient.User = exceptionContext.HttpContext.User.Identity.Name;
-      }
-
-      SendMessage(raygunClient, exception, tags);
     }
 
     private static List<string> ExtractTagsFromException(Exception exception)
@@ -116,7 +143,7 @@ namespace NLog.Raygun
       return client;
     }
 
-    private void SendMessage(RaygunClient client, Exception exception, IList<string> exceptionTags)
+    private void SendMessage(RaygunClient client, Exception exception, IList<string> exceptionTags, IDictionary userCustomData)
     {
       if (!string.IsNullOrWhiteSpace(Tags))
       {
@@ -128,7 +155,7 @@ namespace NLog.Raygun
         }
       }
 
-      client.SendInBackground(exception, exceptionTags);
+      client.SendInBackground(exception, exceptionTags, userCustomData);
     }
 
     private string[] SplitValues(string input)
