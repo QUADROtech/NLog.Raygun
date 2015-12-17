@@ -32,6 +32,10 @@ namespace NLog.Raygun
         [RequiredParameter]
         public string IgnoreHeaderNames { get; set; }
 
+        public List<string> IgnoreMessageStringStartsWith { get; set; }
+
+        public List<string> IgnoreMessageStringContains { get; set; }
+
         public List<string> GlobalDiagnosticContextNames { get; set; }
 
         public List<string> GlobalDiagnosticContextNamesAsTags { get; set; }
@@ -46,6 +50,8 @@ namespace NLog.Raygun
             MappedDiagnosticsContextNames = new List<string>();
             MappedDiagnosticsContextNamesAsTags = new List<string>();
             MappedDiagnosticsContextNamesAsTags = new List<string>();
+            IgnoreMessageStringStartsWith = new List<string>();
+            IgnoreMessageStringContains = new List<string>();
         }
 
         [RequiredParameter]
@@ -90,13 +96,38 @@ namespace NLog.Raygun
                 var aggregateException = exception as AggregateException;
                 foreach (var innerException in aggregateException.InnerExceptions)
                 {
+                    if (IgnoreMessage(innerException))
+                    {
+                        continue;
+                    }
+
                     SendMessage(raygunClient, innerException, tags.ToList(), properties);
                 }
             }
             else
             {
+                if (IgnoreMessage(exception))
+                {
+                    return;
+                }
+
                 SendMessage(raygunClient, exception, tags.ToList(), properties);
             }
+        }
+
+        private bool IgnoreMessage(Exception exception)
+        {
+            if (IgnoreMessageStringContains.Any(ignore => exception.Message.Contains(ignore)))
+            {
+                return true;
+            }
+
+            if (IgnoreMessageStringStartsWith.Any(ignore => exception.Message.StartsWith(ignore)))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private List<string> ExtractTagsFromContexts()
